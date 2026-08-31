@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Xero export assembler</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+:root{
+  --ink:#14171c; --paper:#fbfaf7; --rule:#d8d4cb;
+  --pass:#1f6f43; --fail:#a4262c; --warn:#8a5a00;
+  --accent:#2a4d8f; --muted:#6b6f76;
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--paper); color:var(--ink);
+  font:14px/1.5 "IBM Plex Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
+}
+.wrap{max-width:960px;margin:0 auto;padding:40px 24px 80px}
+h1{font:600 22px/1.2 "IBM Plex Sans",Arial,sans-serif;margin:0 0 4px;letter-spacing:-.01em}
+.sub{color:var(--muted);margin:0 0 32px}
+.step{border-top:1px solid var(--rule);padding:22px 0}
+.step-h{display:flex;gap:10px;align-items:baseline;margin-bottom:12px}
+.num{font:600 11px/1 "IBM Plex Mono",monospace;color:var(--muted);
+     border:1px solid var(--rule);border-radius:3px;padding:4px 6px}
+.step-t{font-weight:600}
+.hint{color:var(--muted);font-size:13px;margin:0 0 12px}
+.drop{
+  border:1.5px dashed var(--rule);border-radius:6px;background:#fff;
+  padding:26px;text-align:center;cursor:pointer;transition:.15s;
+}
+.drop:hover,.drop.over{border-color:var(--accent);background:#f4f7fd}
+.drop.done{border-style:solid;border-color:var(--pass);background:#f3f9f5;text-align:left}
+.drop strong{display:block;margin-bottom:2px}
+.drop small{color:var(--muted)}
+table{width:100%;border-collapse:collapse;margin-top:6px;font-size:13px}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--rule)}
+th{font:600 11px/1 "IBM Plex Mono",monospace;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+td.num-cell{text-align:right;font-family:"IBM Plex Mono",monospace}
+.badge{font:600 11px/1 "IBM Plex Mono",monospace;padding:4px 7px;border-radius:3px;white-space:nowrap}
+.b-pass{background:#e6f2ea;color:var(--pass)}
+.b-fail{background:#fbeaeb;color:var(--fail)}
+.b-warn{background:#fdf3e0;color:var(--warn)}
+button{
+  font:600 14px/1 inherit;padding:12px 20px;border-radius:5px;border:1px solid var(--ink);
+  background:var(--ink);color:#fff;cursor:pointer
+}
+button:disabled{background:#c9c6bf;border-color:#c9c6bf;cursor:not-allowed}
+button.ghost{background:#fff;color:var(--ink)}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.note{font-size:13px;color:var(--muted);margin-top:10px}
+.hide{display:none}
+code{font-family:"IBM Plex Mono",monospace;font-size:12px;background:#efece6;padding:1px 5px;border-radius:3px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Xero export assembler</h1>
+  <p class="sub">Flattens the WFM Analytics multi-tab export into one Xero-ready CSV, and checks it before you import.</p>
+
+  <div class="step">
+    <div class="step-h"><span class="num">1</span><span class="step-t">Ticketing allocation export</span></div>
+    <p class="hint">The multi-tab file with one venue per tab. Every tab is stacked, headers or not.</p>
+    <div class="drop" id="dropA">
+      <strong>Choose file or drop it here</strong>
+      <small>.xlsx from the six allocation grids</small>
+    </div>
+    <input type="file" id="fileA" accept=".xlsx,.xls" class="hide">
+  </div>
+
+  <div class="step">
+    <div class="step-h"><span class="num">2</span><span class="step-t">Casual weekly export <span style="font-weight:400;color:var(--muted)">— optional</span></span></div>
+    <p class="hint">Add it and the allocation lines merge onto the same invoices. Skip it for allocation lines only.</p>
+    <div class="drop" id="dropB">
+      <strong>Choose file or drop it here</strong>
+      <small>.xlsx from the main invoice grid</small>
+    </div>
+    <input type="file" id="fileB" accept=".xlsx,.xls" class="hide">
+  </div>
+
+  <div class="step hide" id="stepChecks">
+    <div class="step-h"><span class="num">3</span><span class="step-t">Checks</span></div>
+    <table id="checks"></table>
+    <div id="invTableWrap" class="hide">
+      <table id="invTable"></table>
+    </div>
+  </div>
+
+  <div class="step hide" id="stepDl">
+    <div class="step-h"><span class="num">4</span><span class="step-t">Download</span></div>
+    <div class="row">
+      <button id="dl">Download CSV</button>
+      <button id="reset" class="ghost">Start again</button>
+    </div>
+    <p class="note" id="dlNote"></p>
+  </div>
+</div>
+
+<script>
+const HEAD=["ContactName","InvoiceNumber","Reference","Description","Quantity","AccountCode",
+"LineAmount","TaxType","TrackingName1","TrackingOption1","TrackingName2","TrackingOption2","Currency","Type"];
+let A=null,B=null,OUT=[],WEEK='';
+
+function wire(dropId,inputId,slot){
+  const d=document.getElementById(dropId), i=document.getElementById(inputId);
+  d.onclick=()=>i.click();
+  d.ondragover=e=>{e.preventDefault();d.classList.add('over')};
+  d.ondragleave=()=>d.classList.remove('over');
+  d.ondrop=e=>{e.preventDefault();d.classList.remove('over');if(e.dataTransfer.files[0])read(e.dataTransfer.files[0],slot,d)};
+  i.onchange=e=>{if(e.target.files[0])read(e.target.files[0],slot,d)};
+}
+function read(file,slot,el){
+  const fr=new FileReader();
+  fr.onload=ev=>{
+    const wb=XLSX.read(new Uint8Array(ev.target.result),{type:'array'});
+    let rows=[], used=0, week='';
+    wb.SheetNames.forEach(n=>{
+      const raw=XLSX.utils.sheet_to_json(wb.Sheets[n],{header:1,blankrows:false});
+      if(!raw.length)return;
+
+      // a "Week Ending" style tab: one narrow column, grab the value and move on
+      if(raw.every(r=>r.length<3)){
+        raw.forEach(r=>{const v=String(r[0]||'').trim();
+          if(/^WE\d{6}$/.test(v)) week=v;});
+        return;
+      }
+
+      // find a header row so columns map by name, not position
+      let hIx=-1;
+      for(let i=0;i<Math.min(raw.length,5);i++){
+        const cells=raw[i].map(c=>String(c||'').trim());
+        if(cells.includes('ContactName')&&cells.includes('InvoiceNumber')){hIx=i;break;}
+      }
+      const map={};
+      if(hIx>=0){
+        raw[hIx].forEach((c,ix)=>{const k=String(c||'').trim(); if(HEAD.includes(k)) map[k]=ix;});
+      }else{
+        if(raw[0].length<HEAD.length) return;      // not a data tab
+        HEAD.forEach((h,ix)=>map[h]=ix);           // headers suppressed: positional
+      }
+
+      let got=0;
+      raw.forEach((r,i)=>{
+        if(i<=hIx)return;
+        if(!r||!r.length)return;
+        const name=String(r[map.ContactName]||'').trim();
+        const inv =String(r[map.InvoiceNumber]||'').trim();
+        if(!name||name==='ContactName')return;      // header repeat or blank
+        if(!inv)return;                             // total / spacer row
+        const o={}; HEAD.forEach(h=>o[h]=map[h]!==undefined&&r[map[h]]!==undefined?r[map[h]]:'');
+        rows.push(o); got++;
+      });
+      if(got)used++;
+    });
+    if(slot==='A'){A=rows;WEEK=week||WEEK;} else {B=rows;WEEK=WEEK||week;}
+    el.classList.add('done');
+    el.innerHTML='<strong>'+file.name+'</strong><small>'+used+
+      ' data tab'+(used===1?'':'s')+' &middot; '+rows.length+' line'+(rows.length===1?'':'s')+
+      (week?' &middot; '+week:'')+'</small>';
+    build();
+  };
+  fr.readAsArrayBuffer(file);
+}
+const money=n=>'$'+Number(n).toLocaleString('en-AU',{minimumFractionDigits:2,maximumFractionDigits:2});
+
+function build(){
+  if(!A)return;
+  OUT=(B||[]).concat(A);
+  const alloc=A, allocTot=alloc.reduce((s,r)=>s+(+r.LineAmount||0),0);
+  const outTot=OUT.reduce((s,r)=>s+(+r.LineAmount||0),0);
+  const zero=OUT.filter(r=>Number(r.LineAmount)===0).length;
+  const unmapped=OUT.filter(r=>/UNMAPPED/i.test(r.ContactName+' '+r.TrackingOption1+' '+r.TrackingOption2)).length;
+  const invs=[...new Set(OUT.map(r=>r.InvoiceNumber))];
+  let orphan=0;
+  if(B){const bi=new Set(B.map(r=>r.InvoiceNumber)); orphan=alloc.filter(r=>!bi.has(r.InvoiceNumber)).length;}
+
+  const rows=[];
+  if(WEEK) rows.push(['Week ending',WEEK,'info','']);
+  rows.push(...[
+    ['Allocation lines',alloc.length,alloc.length===6?'pass':'warn',
+      alloc.length===6?'OK':'Expected 6'],
+    ['Allocation total',money(allocTot),'info',''],
+    ['Total lines out',OUT.length,'info',''],
+    ['Total amount',money(outTot),'info',''],
+    ['Distinct invoices',invs.length,'info',''],
+  ]);
+  if(B) rows.push(['Allocation lines with no matching invoice',orphan,orphan===0?'pass':'fail',
+      orphan===0?'All merge onto existing invoices':'These will create new invoices']);
+  rows.push(['Zero-value lines',zero,zero===0?'pass':'warn',zero===0?'None':'Removed from the CSV']);
+  rows.push(['UNMAPPED values',unmapped,unmapped===0?'pass':'fail',unmapped===0?'None':'Fix the mapping before importing']);
+
+  let h='<tr><th>Check</th><th>Value</th><th>Result</th></tr>';
+  rows.forEach(r=>{
+    const cls=r[2]==='pass'?'b-pass':r[2]==='fail'?'b-fail':r[2]==='warn'?'b-warn':'';
+    const badge=r[2]==='info'?'<span style="color:var(--muted)">'+r[3]+'</span>'
+      :'<span class="badge '+cls+'">'+r[3]+'</span>';
+    h+='<tr><td>'+r[0]+'</td><td class="num-cell">'+r[1]+'</td><td>'+badge+'</td></tr>';
+  });
+  document.getElementById('checks').innerHTML=h;
+
+  const by={};
+  OUT.forEach(r=>{by[r.InvoiceNumber]=by[r.InvoiceNumber]||{n:0,t:0,c:r.ContactName};
+    by[r.InvoiceNumber].n++; by[r.InvoiceNumber].t+=(+r.LineAmount||0);});
+  let t='<tr><th>Invoice</th><th>Contact</th><th>Lines</th><th>Amount</th></tr>';
+  Object.keys(by).sort().forEach(k=>{
+    t+='<tr><td><code>'+k+'</code></td><td>'+by[k].c+'</td><td class="num-cell">'+by[k].n+
+       '</td><td class="num-cell">'+money(by[k].t)+'</td></tr>';
+  });
+  document.getElementById('invTable').innerHTML=t;
+  document.getElementById('invTableWrap').classList.remove('hide');
+  document.getElementById('stepChecks').classList.remove('hide');
+  document.getElementById('stepDl').classList.remove('hide');
+  const kept=OUT.filter(r=>Number(r.LineAmount)!==0).length;
+  document.getElementById('dlNote').textContent=
+    kept+' lines across '+Object.keys(by).length+' invoices. Zero-value lines are left out.';
+}
+
+document.getElementById('dl').onclick=()=>{
+  const rows=OUT.filter(r=>Number(r.LineAmount)!==0);
+  const esc=v=>{v=v===undefined||v===null?'':String(v);
+    return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v;};
+  const cell=(r,h)=>h==='LineAmount'&&r[h]!==''&&r[h]!==null&&!isNaN(r[h])
+      ?Number(r[h]).toFixed(2):r[h];
+  const csv=[HEAD.join(',')].concat(rows.map(r=>HEAD.map(h=>esc(cell(r,h))).join(','))).join('\n');
+  const inv=WEEK||(rows.length?String(rows[0].InvoiceNumber).slice(0,8):'export');
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8;'}));
+  a.download='Xero_Import_'+inv+'.csv'; a.click();
+};
+document.getElementById('reset').onclick=()=>location.reload();
+wire('dropA','fileA','A'); wire('dropB','fileB','B');
+</script>
+</body>
+</html>
